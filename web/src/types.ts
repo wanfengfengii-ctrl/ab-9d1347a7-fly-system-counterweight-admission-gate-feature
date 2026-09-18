@@ -39,3 +39,17 @@ export interface TransferResult {
   source?: BattenSummary;
   target?: BattenSummary;
 }
+
+export interface CorrectWeightResult {
+  accepted: boolean;
+  reason?: string;
+  message: string;
+  batten_id?: string;
+  load_id?: number;
+  piece_id?: string;
+  previous_weight_grams?: number;
+  weight_grams?: number;
+  capacity_grams?: number;
+  total_grams?: number;
+  remaining_grams?: number;
+}

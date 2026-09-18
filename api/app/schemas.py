@@ -10,3 +10,9 @@ class LoadCreate(BaseModel):
 class TransferCreate(BaseModel):
     # 转移目标吊杆编号；与源杆相同、不存在由接口在锁内明确拒绝
     target_batten_id: str = Field(min_length=1, max_length=32)
+
+
+class WeightCorrect(BaseModel):
+    # 装台复核时修正后的标称重量：沿用单片重量范围与严格整数规则，
+    # 字符串 "100"、小数 100.0、布尔值一律拒绝，不做隐式转换
+    weight_grams: StrictInt

@@ -139,6 +139,29 @@ td {
   text-align: left;
 }
 
+td button + button {
+  margin-left: 8px;
+}
+
+.correct-btn {
+  padding: 5px 14px;
+  border: 1px solid #047857;
+  border-radius: 7px;
+  background: #fff;
+  color: #047857;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.correct-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.confirm-correct {
+  background: #047857;
+}
+
 .transfer-btn {
   padding: 5px 14px;
   border: 1px solid #2563eb;

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
 from .models import Batten, Load
-from .schemas import LoadCreate, TransferCreate
+from .schemas import LoadCreate, TransferCreate, WeightCorrect
 
 MIN_WEIGHT_GRAMS = 100
 MAX_WEIGHT_GRAMS = 25000
@@ -55,6 +55,11 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
         "target_batten_id" in locs or "body" in locs
     ):
         message = "请求格式不合法：转移目标参数不合法，目标吊杆编号必须是非空字符串"
+    elif request.url.path.endswith("/correct-weight") and (
+        "weight_grams" in locs or "body" in locs
+    ):
+        # 修正重量不涉及配重标识：缺 body、缺字段或重量非严格整数都只提示新重量
+        message = "请求格式不合法：新重量必须是整数克数"
     else:
         message = "请求格式不合法：配重片标识不能为空，重量必须是整数克数"
     return JSONResponse(
@@ -314,6 +319,97 @@ def transfer_load(
         "target_batten_id": target_id,
         "source": source_summary,
         "target": target_summary,
+    }
+
+
+@app.post("/api/battens/{batten_id}/loads/{load_id}/correct-weight")
+def correct_load_weight(
+    batten_id: str,
+    load_id: int,
+    payload: WeightCorrect,
+    db: Session = Depends(get_db),
+):
+    """装台复核发现标称重量录错：直接修正现有明细记录的重量。
+
+    不删除配重片、不重新登记：只更新 weight_grams，配重标识 piece_id 与
+    最初登记时间 created_at 原样保留。同一事务内先以行锁锁定路径指定的
+    吊杆，再确认装载记录仍归属于该杆，随后按新旧重量之差重新核算容量：
+    新总重（当前总重 - 旧重量 + 新重量）恰好达到核定值允许写入。
+    任一条件不满足均回滚，数据库中的原重量保持不变。
+    """
+    new_weight = payload.weight_grams
+    if not MIN_WEIGHT_GRAMS <= new_weight <= MAX_WEIGHT_GRAMS:
+        return reject(
+            422,
+            "INVALID_WEIGHT",
+            f"单片重量必须在 {MIN_WEIGHT_GRAMS}～{MAX_WEIGHT_GRAMS} 克之间，"
+            f"收到 {new_weight} 克",
+        )
+
+    # SELECT ... FOR UPDATE：先锁定路径指定的吊杆，与并发装载 / 转移 /
+    # 修正串行化，后到者在锁释放后读到最新已提交总重再裁决。
+    batten = db.scalar(
+        select(Batten).where(Batten.id == batten_id).with_for_update()
+    )
+    if batten is None:
+        db.rollback()
+        return reject(404, "BATTEN_NOT_FOUND", f"吊杆 {batten_id} 不存在")
+
+    # 锁内再确认装载记录：编号从未登记过明确报告记录不存在；记录仍在
+    # 但已被其他终端转移到别处时，提示当前位置已变化并让页面重新加载明细
+    load = db.scalar(select(Load).where(Load.id == load_id).with_for_update())
+    if load is None:
+        db.rollback()
+        return reject(
+            404,
+            "LOAD_NOT_FOUND",
+            f"装载记录 {load_id} 不存在",
+            batten_id=batten_id,
+            load_id=load_id,
+        )
+    if load.batten_id != batten_id:
+        db.rollback()
+        return reject(
+            409,
+            "POSITION_CHANGED",
+            f"装载记录当前位置已变化：已不在吊杆 {batten_id} 上，"
+            "可能已被其他终端转移，请重新加载明细",
+            batten_id=batten_id,
+            load_id=load_id,
+        )
+
+    old_weight = load.weight_grams
+    summary = batten_summary(db, batten)
+    # 以新旧重量差重新核算容量：当前总重含本片旧重量，替换为新重量
+    new_total = summary["total_grams"] - old_weight + new_weight
+    if new_total > batten.capacity_grams:
+        db.rollback()
+        return reject(
+            409,
+            "OVER_CAPACITY",
+            f"吊杆 {batten_id} 当前总重 {summary['total_grams']} 克，"
+            f"配重片 {load.piece_id} 重量由 {old_weight} 克修正为 {new_weight} 克，"
+            f"修正后合计 {new_total} 克超出核定 {batten.capacity_grams} 克",
+            **{k: v for k, v in summary.items() if k != "batten_id"},
+        )
+
+    # 只改重量：piece_id 与 created_at 原样保留，不删除、不重新登记
+    load.weight_grams = new_weight
+    db.commit()
+
+    return {
+        "accepted": True,
+        "message": (
+            f"配重片 {load.piece_id} 重量已由 {old_weight} 克修正为 {new_weight} 克"
+        ),
+        "batten_id": batten_id,
+        "load_id": load.id,
+        "piece_id": load.piece_id,
+        "previous_weight_grams": old_weight,
+        "weight_grams": new_weight,
+        "capacity_grams": batten.capacity_grams,
+        "total_grams": new_total,
+        "remaining_grams": batten.capacity_grams - new_total,
     }
 
 
