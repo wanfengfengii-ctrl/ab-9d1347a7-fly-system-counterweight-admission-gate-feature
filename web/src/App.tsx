@@ -1,5 +1,11 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { fetchBatten, fetchBattens, submitLoad, transferLoad } from './api';
+import {
+  correctLoadWeight,
+  fetchBatten,
+  fetchBattens,
+  submitLoad,
+  transferLoad,
+} from './api';
 import type { BattenDetail, BattenSummary, LoadItem } from './types';
 
 interface Feedback {
@@ -18,6 +24,9 @@ export default function App() {
   // 待转移的配重片（来自当前吊杆明细）；null 表示未进入转移流程
   const [transferring, setTransferring] = useState<LoadItem | null>(null);
   const [transferTarget, setTransferTarget] = useState('');
+  // 待修正重量的配重片；null 表示未进入修正流程
+  const [correcting, setCorrecting] = useState<LoadItem | null>(null);
+  const [correctWeight, setCorrectWeight] = useState('');
 
   // 单调递增的刷新序号：放弃早于最新一次刷新返回的过期响应，
   // 避免上一个动作的在途拉取在新动作之后落地，把界面回滚成旧状态
@@ -43,10 +52,12 @@ export default function App() {
     void refresh(selected);
   }, [refresh, selected]);
 
-  // 切换吊杆后，上一根吊杆的待转移配重片不再适用于当前明细
+  // 切换吊杆后，上一根吊杆的待转移 / 待修正配重片不再适用于当前明细
   useEffect(() => {
     setTransferring(null);
     setTransferTarget('');
+    setCorrecting(null);
+    setCorrectWeight('');
   }, [selected]);
 
   async function handleSubmit(event: FormEvent) {
@@ -83,6 +94,9 @@ export default function App() {
 
   function beginTransfer(load: LoadItem) {
     setFeedback(null);
+    // 转移与修正互斥：进入转移流程时收起可能打开的修正面板
+    setCorrecting(null);
+    setCorrectWeight('');
     setTransferring(load);
     // 默认目标为另一根吊杆
     setTransferTarget(battens.find((b) => b.batten_id !== selected)?.batten_id ?? '');
@@ -122,6 +136,56 @@ export default function App() {
       setSubmitting(false);
     }
     // 无论成功或拒绝，都刷新两根吊杆总重、余量与明细
+    await refresh(selected);
+  }
+
+  function beginCorrect(load: LoadItem) {
+    setFeedback(null);
+    // 修正与转移互斥：进入修正流程时收起可能打开的转移面板
+    setTransferring(null);
+    setTransferTarget('');
+    setCorrecting(load);
+    // 预填当前标称重量，便于技师在原值上改数
+    setCorrectWeight(String(load.weight_grams));
+  }
+
+  function cancelCorrect() {
+    setCorrecting(null);
+    setCorrectWeight('');
+  }
+
+  async function confirmCorrect() {
+    if (!correcting) return;
+    setFeedback(null);
+    const trimmed = correctWeight.trim();
+    // 与登记表单一致：按原始输入严格判定整数克数
+    if (!/^-?\d+$/.test(trimmed)) {
+      setFeedback({ kind: 'error', text: '修正后的重量必须是整数克数' });
+      return;
+    }
+    const grams = Number(trimmed);
+    setSubmitting(true);
+    try {
+      const { body } = await correctLoadWeight(selected, correcting.load_id, grams);
+      if (body.accepted) {
+        setFeedback({
+          kind: 'success',
+          text: `${body.message}：当前总重 ${body.total_grams} 克，剩余量 ${body.remaining_grams} 克`,
+        });
+        setCorrecting(null);
+        setCorrectWeight('');
+      } else {
+        // 当前位置已变化、越界、超载等拒绝后，明细需要以数据库为准刷新
+        setFeedback({ kind: 'error', text: `已拒绝：${body.message}` });
+        setCorrecting(null);
+        setCorrectWeight('');
+      }
+    } catch {
+      setFeedback({ kind: 'error', text: '网络错误，无法联系装载裁决服务' });
+    } finally {
+      setSubmitting(false);
+    }
+    // 无论成功或拒绝，都刷新吊杆总重、余量与明细
     await refresh(selected);
   }
 
@@ -243,6 +307,15 @@ export default function App() {
                       >
                         转移
                       </button>
+                      <button
+                        type="button"
+                        className="correct-btn"
+                        aria-label={`修正重量 ${load.piece_id}`}
+                        onClick={() => beginCorrect(load)}
+                        disabled={submitting}
+                      >
+                        修正重量
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -283,6 +356,40 @@ export default function App() {
                 className="cancel-transfer"
                 disabled={submitting}
                 onClick={cancelTransfer}
+              >
+                取消
+              </button>
+            </div>
+          )}
+
+          {correcting && (
+            <div className="correct-panel" role="group" aria-label="修正重量确认">
+              <p>
+                修正配重片 <strong>{correcting.piece_id}</strong> 的标称重量：
+                当前 {correcting.weight_grams} 克，配重标识与登记时间保持不变。
+              </p>
+              <label htmlFor="correct-weight">新重量（克）</label>
+              <input
+                id="correct-weight"
+                type="text"
+                inputMode="numeric"
+                value={correctWeight}
+                placeholder="100 ~ 25000 的整数"
+                onChange={(e) => setCorrectWeight(e.target.value)}
+              />
+              <button
+                type="button"
+                className="confirm-correct"
+                disabled={submitting || !correctWeight.trim()}
+                onClick={() => void confirmCorrect()}
+              >
+                确认修正
+              </button>
+              <button
+                type="button"
+                className="cancel-correct"
+                disabled={submitting}
+                onClick={cancelCorrect}
               >
                 取消
               </button>

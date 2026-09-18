@@ -1,6 +1,7 @@
 import type {
   BattenDetail,
   BattenSummary,
+  CorrectionResult,
   LoadResult,
   TransferResult,
 } from './types';
@@ -45,6 +46,20 @@ export function transferLoad(
     {
       method: 'POST',
       body: JSON.stringify({ target_batten_id: targetBattenId }),
+    },
+  );
+}
+
+export function correctLoadWeight(
+  battenId: string,
+  loadId: number,
+  weightGrams: number,
+) {
+  return request<CorrectionResult>(
+    `/api/battens/${encodeURIComponent(battenId)}/loads/${loadId}/correct-weight`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ weight_grams: weightGrams }),
     },
   );
 }

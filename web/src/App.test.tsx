@@ -325,4 +325,120 @@ describe('吊杆配重装载页（真实接口反馈）', () => {
     expect(dst.total_grams).toBe(35000);
     expect(dst.remaining_grams).toBe(15000);
   });
+
+  it('修正重量：成功后刷新总重、余量与明细，标识与登记时间保留', async () => {
+    const user = await renderLoaded();
+    await submitPiece(user, 'CW-FIX', '20000');
+    await screen.findByRole('status');
+    // 提交后的明细刷新落地后再操作修正入口
+    await screen.findByRole('cell', { name: 'CW-FIX' });
+
+    // 修正前先从数据库记录该笔明细，用于核对修正不是删除重登
+    const before = await dbBatten('G-01');
+    const loadBefore = before.loads.find(
+      (l: { piece_id: string }) => l.piece_id === 'CW-FIX',
+    );
+    expect(loadBefore).toBeTruthy();
+
+    // 明细中的“修正重量”入口
+    await user.click(screen.getByRole('button', { name: '修正重量 CW-FIX' }));
+
+    // 确认面板出现并预填当前标称重量
+    const panel = screen.getByRole('group', { name: '修正重量确认' });
+    expect(panel).toBeInTheDocument();
+    const weightInput = screen.getByLabelText('新重量（克）') as HTMLInputElement;
+    expect(weightInput.value).toBe('20000');
+
+    // 减重到 12000 克并确认
+    await user.clear(weightInput);
+    await user.type(weightInput, '12000');
+    await user.click(screen.getByRole('button', { name: '确认修正' }));
+
+    // 成功提示明确展示修正结果（旧值→新值）与刷新后的总重 / 余量
+    const status = await screen.findByRole('status');
+    expect(status).toHaveTextContent('重量已由 20000 克修正为 12000 克');
+    expect(status).toHaveTextContent('当前总重 12000 克');
+    expect(status).toHaveTextContent('剩余量 18000 克');
+
+    // 面板关闭，明细刷新：仍是同一片，重量变为 12000
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: '修正重量确认' })).toBeNull(),
+    );
+    await waitFor(() => expect(screen.getByTestId('total')).toHaveTextContent('12000 克'));
+    expect(screen.getByTestId('remaining')).toHaveTextContent('18000 克');
+    expect(screen.getByRole('cell', { name: 'CW-FIX' })).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: '12000' })).toBeInTheDocument();
+
+    // 直接与数据库核对：同一条记录（load_id 不变），配重标识与最初登记时间保留
+    const db = await dbBatten('G-01');
+    expect(db.total_grams).toBe(12000);
+    expect(db.remaining_grams).toBe(18000);
+    expect(db.loads).toHaveLength(1);
+    const loadAfter = db.loads[0];
+    expect(loadAfter.load_id).toBe(loadBefore.load_id);
+    expect(loadAfter.piece_id).toBe('CW-FIX');
+    expect(loadAfter.weight_grams).toBe(12000);
+    expect(loadAfter.created_at).toBe(loadBefore.created_at);
+  });
+
+  it('修正导致超载时被拒绝，页面与数据库均保持原重量', async () => {
+    const user = await renderLoaded();
+    // G-01 合计 25000 克（余 5000）：把 5000 克的 CW-BIG 改成 10001 克，
+    // 新重量在单片范围内但合计 30001 克超载（用于触发容量裁决而非单片范围裁决）
+    await submitPiece(user, 'CW-BIG', '5000');
+    await screen.findByRole('status');
+    await submitPiece(user, 'CW-OTHER', '20000');
+    await screen.findByRole('status');
+    await screen.findByRole('cell', { name: 'CW-BIG' });
+
+    await user.click(screen.getByRole('button', { name: '修正重量 CW-BIG' }));
+    const weightInput = screen.getByLabelText('新重量（克）');
+    await user.clear(weightInput);
+    await user.type(weightInput, '10001');
+    await user.click(screen.getByRole('button', { name: '确认修正' }));
+
+    // 明确的拒绝原因反馈
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('已拒绝');
+    expect(alert).toHaveTextContent('超出核定');
+
+    // 页面明细回到数据库状态：总重、余量与原重量均未变
+    await waitFor(() => expect(screen.getByTestId('total')).toHaveTextContent('25000 克'));
+    expect(screen.getByTestId('remaining')).toHaveTextContent('5000 克');
+    expect(screen.getByRole('cell', { name: 'CW-BIG' })).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: '5000' })).toBeInTheDocument();
+
+    // 数据库中的原重量保持不变
+    const db = await dbBatten('G-01');
+    expect(db.total_grams).toBe(25000);
+    expect(db.remaining_grams).toBe(5000);
+    const weights = Object.fromEntries(
+      db.loads.map((l: { piece_id: string; weight_grams: number }) => [
+        l.piece_id,
+        l.weight_grams,
+      ]),
+    );
+    expect(weights).toEqual({ 'CW-BIG': 5000, 'CW-OTHER': 20000 });
+  });
+
+  it('修正输入非整数时页面直接拒绝且不提交', async () => {
+    const user = await renderLoaded();
+    await submitPiece(user, 'CW-TYPE', '10000');
+    await screen.findByRole('status');
+    await screen.findByRole('cell', { name: 'CW-TYPE' });
+
+    await user.click(screen.getByRole('button', { name: '修正重量 CW-TYPE' }));
+    const weightInput = screen.getByLabelText('新重量（克）');
+    await user.clear(weightInput);
+    await user.type(weightInput, '12000.5');
+    await user.click(screen.getByRole('button', { name: '确认修正' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('整数克数');
+
+    // 面板仍在，数据库无变化
+    expect(screen.getByRole('group', { name: '修正重量确认' })).toBeInTheDocument();
+    const db = await dbBatten('G-01');
+    expect(db.loads[0].weight_grams).toBe(10000);
+  });
 });
